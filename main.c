@@ -81,7 +81,7 @@ void stepper_init(){
 	  TIM3->ARR = init_speed;           // Auto reload value
 	  TIM3->DIER = TIM_DIER_UIE; // Enable update interrupt (timer level)
 	  TIM3->CR1 |= TIM_CR1_CEN;   // Enable timer
-	  //NVIC_EnableIRQ(TIM3_IRQn); // Enable interrupt from TIM3 (NVIC level)
+	  NVIC_EnableIRQ(TIM3_IRQn); // Enable interrupt from TIM3 (NVIC level)
 	  GPIOE->ODR |= GPIO_ODR_OD1; //set dir pin high
 
 
