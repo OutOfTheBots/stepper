@@ -28,23 +28,18 @@ float tick_freq; //the freq that the steps need to be calculated from frq_counte
 float speed = 0; //the current speed measured by timer ticks in ARR value to count up to
 float target_speed = 0; //the target speed that speed is accelerating towards
 
-
 int32_t n = 0;
-
-uint8_t speed_up;
-int8_t new_dir=1;
-int8_t old_dir=1;
-uint8_t second_time = 0;
-
-
-
-
+uint8_t speed_up; //boolean used to tell whether in speed up process or slow down
+int8_t new_dir=1; //the final direction desired
+int8_t old_dir=1; //the direction before
+uint8_t second_time = 0; //boolean used to create double toggle of step pin i.e high/low
 
 
 int main(void){
   SystemClock_Config();
   stepper_init();
 
+  //test some speeds :)
   set_speed(200);
   HAL_Delay(5000);
 
@@ -107,32 +102,35 @@ void stepper_init(){
 
 
 void set_speed(float RPM){
-	if(RPM > 0){
+
+	if(RPM > 0){ //set dirction boolean
 		new_dir = 1;
 	}else if (RPM < 0) {
 		new_dir = 0;
-		RPM = -1 * RPM;
+		RPM = -1 * RPM; //if RPM is negative then flip sign
 	}
 
-	if(RPM != 0){
+	if(RPM != 0){ //only enters this loop if desired RPM isn't zero
 
 		tick_freq = 2 * SPR * RPM / 60;
 		target_speed = freq_counter / tick_freq;
 
-		if(target_speed > 65535){
+		if(target_speed > 65535){ //check that the desired RPM hasn't caused the ARR to overflow
 			target_speed = 65535;
 		}
-		if((speed == 0) && (target_speed !=0)){
+
+		if((speed == 0) && (target_speed !=0)){ //if stopped and want to start again
 			speed = init_speed;
 			n = 0;
 		}
 
-		if(target_speed < speed){
+		if(target_speed < speed){ //set boolean to either speed up or slow down
 			speed_up = 1;
 		}else {
 			speed_up = 0;
 		}
-	}else{
+
+	}else{ //only does this if desired to stop
 		target_speed = 0;
 		speed_up = 0;
 	}
@@ -143,50 +141,55 @@ void TIM3_IRQHandler(void){
 	if(TIM3->SR & TIM_SR_UIF){ // if UIF flag is set
 		TIM3->SR &= ~TIM_SR_UIF; // clear UIF flag
 
-		if((speed != 0) || (target_speed != 0)){
-			HAL_GPIO_TogglePin(GPIOE, GPIO_PIN_0);
-			if(second_time){
+		if((speed != 0) || (target_speed != 0)){ //only enters this loop if not at stand still
+			HAL_GPIO_TogglePin(GPIOE, GPIO_PIN_0); //toggle the step pin, it requires this to happen twice to complet 1 step i.e high/low
 
-				if(new_dir == old_dir){
+			if(second_time){ //only enters this loop every second time that way the toggle happens twice to every 1 loop
+
+				if(new_dir == old_dir){ //only enters this loop if current direction is same as desired direction
+
 					if(((target_speed > init_speed - 100) || (target_speed == 0)) && (speed > init_speed - 100)){
-						speed = target_speed;
+						speed = target_speed; //if desired speed is slow and current speed is slow then goto striahgt to it
 					}else if ((speed > init_speed - 100) && (target_speed < init_speed - 100) && (speed_up) && (target_speed !=0)){
-						speed = init_speed;
+						speed = init_speed; //if current speed is slow and desired speed is fast then goto start acceleration speed
 						n = 0;
 					}
 
-					if ((speed_up) && (speed > target_speed)){
+					if ((speed_up) && (speed > target_speed)){ //enter this loop if speeding up
 						n++;
 						speed = speed - ( (2 * speed) / (4 * n + 1) );
-					}else if ((!speed_up) && ((speed < target_speed) || target_speed == 0)){
+					}else if ((!speed_up) && ((speed < target_speed) || target_speed == 0)){ //enter this loop if slowing down
 						n--;
 						speed = (speed * (4 * n + 1) / (4 * n - 1));
 					}
-				}else{
-					if(speed == 65000){
+
+				}else{ //only enters this loop if current direction is different to desired direction
+
+					if(speed == 65000){ //if speed is super slow then toggle dir pin and set speed_up boolean to speed up
 						HAL_GPIO_TogglePin(GPIOE, GPIO_PIN_1);
 						old_dir = new_dir;
 						speed_up = 1;
-					}else if(speed > init_speed - 100){
+
+					}else if(speed > init_speed - 100){ //if speed is slower than acceleration speed then set speed to super slow
 						speed = 65000;
 
-					}else{
+					}else{ //onyl enters this loop if going fast to just decelerate
 						n--;
 						speed = (speed * (4 * n + 1) / (4 * n - 1));
 					}
 				}
 
-				if(speed > 65535){
+				if(speed > 65535){ //check to make sure speed won't over the ARR
 					speed = 65535;
 				}
 
-				if (speed != 0){
+				if (speed != 0){ //if speed isn't zero then update ARR
 					TIM3->ARR = (uint32_t)speed;//update ARR
 				}
 			}
-			second_time = !second_time;
+			second_time = !second_time; //flip second_time boolean
 
-		}   	//GPIOE->ODR &= ~GPIO_ODR_OD0;//set step pin low
+		}
 	}
 }
 
