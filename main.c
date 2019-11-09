@@ -18,52 +18,53 @@ static void MX_TIM4_Init(void);
 void stepper_init();
 void set_speed(float target_speed);
 
-uint32_t freq_source = 80000000;
+#define freq_source 80000000 //internal clock source freq
 
-uint16_t prescaler = 40;
-uint32_t freq_counter;
+uint16_t prescaler = 40; //prescaler used by timer
+uint32_t freq_counter; //the freq of the timer calculated from freq_source and prescaler
+uint16_t init_speed = 5000; //this sets the acceleration by setting the timing of first step, the smaller the number the faster the acceleration
+uint16_t SPR = 3200; //steps per revolution of the stepper motor
+float tick_freq; //the freq that the steps need to be calculated from frq_counter RPM and SPR
+float speed = 0; //the current speed measured by timer ticks in ARR value to count up to
+float target_speed = 0; //the target speed that speed is accelerating towards
+
+
 int32_t n = 0;
-uint16_t init_speed = 10000;
-float speed;
-float max_speed = 0;
-float RPM;
-float tick_freq;
-uint32_t change;
+
 uint8_t speed_up;
 int8_t new_dir=1;
 int8_t old_dir=1;
 uint8_t second_time = 0;
 
+
+
+
+
+
 int main(void){
-
   SystemClock_Config();
-
   stepper_init();
 
-
-  set_speed(100);
-  HAL_Delay(2000);
-
-  set_speed(0.1);
-  HAL_Delay(2000);
-
   set_speed(200);
-  HAL_Delay(3000);
+  HAL_Delay(5000);
 
   set_speed(-200);
-  HAL_Delay(4000);
+  HAL_Delay(5000);
 
-  set_speed(100);
+  set_speed(-100);
+  HAL_Delay(5000);
 
+  set_speed(0);
+  HAL_Delay(5000);
+
+  set_speed(200);
+  HAL_Delay(5000);
 
   while (1)  {
-  	  HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_1);
-	  HAL_Delay(1);
+  	  //HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_1);
+	  //HAL_Delay(500);
   }
 }
-
-
-
 
 
 void stepper_init(){
@@ -73,10 +74,9 @@ void stepper_init(){
 	  MX_TIM5_Init();
 	  MX_TIM4_Init();
 
-	  speed = init_speed;
 	  freq_counter = freq_source / (prescaler + 1);
 
-	  RCC->AHB1ENR |= RCC_APB1ENR_TIM3EN;
+
 	  TIM3->PSC = prescaler;         // Set prescaler
 	  TIM3->ARR = init_speed;           // Auto reload value
 	  TIM3->DIER = TIM_DIER_UIE; // Enable update interrupt (timer level)
@@ -105,49 +105,60 @@ void stepper_init(){
 	  //NVIC_EnableIRQ(TIM7_IRQn); // Enable interrupt(NVIC level)
 }
 
-void set_speed(float target_speed){
-	if(target_speed > 0){
+
+void set_speed(float RPM){
+	if(RPM > 0){
 		new_dir = 1;
-	}else{
+	}else if (RPM < 0) {
 		new_dir = 0;
-		target_speed = -1 * target_speed;
+		RPM = -1 * RPM;
 	}
 
-	tick_freq = 2 * 3200 * target_speed / 60;
-	max_speed = freq_counter / tick_freq;
+	if(RPM != 0){
 
-	if(max_speed > 65535){
-		max_speed = 65535;
-	}
+		tick_freq = 2 * SPR * RPM / 60;
+		target_speed = freq_counter / tick_freq;
 
+		if(target_speed > 65535){
+			target_speed = 65535;
+		}
+		if((speed == 0) && (target_speed !=0)){
+			speed = init_speed;
+			n = 0;
+		}
 
-	if(max_speed < speed){
-		speed_up = 1;
-	}else {
+		if(target_speed < speed){
+			speed_up = 1;
+		}else {
+			speed_up = 0;
+		}
+	}else{
+		target_speed = 0;
 		speed_up = 0;
 	}
 }
+
 
 void TIM3_IRQHandler(void){
 	if(TIM3->SR & TIM_SR_UIF){ // if UIF flag is set
 		TIM3->SR &= ~TIM_SR_UIF; // clear UIF flag
 
-		if(max_speed != 0){
+		if((speed != 0) || (target_speed != 0)){
 			HAL_GPIO_TogglePin(GPIOE, GPIO_PIN_0);
 			if(second_time){
 
 				if(new_dir == old_dir){
-					if((max_speed > init_speed - 100) && (speed > init_speed - 100)){
-						speed = max_speed;
-					}else if ((speed > init_speed - 100) && (max_speed < init_speed - 100) && (speed_up)){
+					if(((target_speed > init_speed - 100) || (target_speed == 0)) && (speed > init_speed - 100)){
+						speed = target_speed;
+					}else if ((speed > init_speed - 100) && (target_speed < init_speed - 100) && (speed_up) && (target_speed !=0)){
 						speed = init_speed;
 						n = 0;
 					}
 
-					if ((speed_up) && (speed > max_speed)){
+					if ((speed_up) && (speed > target_speed)){
 						n++;
 						speed = speed - ( (2 * speed) / (4 * n + 1) );
-					}else if ((!speed_up) && (speed < max_speed)){
+					}else if ((!speed_up) && ((speed < target_speed) || target_speed == 0)){
 						n--;
 						speed = (speed * (4 * n + 1) / (4 * n - 1));
 					}
@@ -169,7 +180,9 @@ void TIM3_IRQHandler(void){
 					speed = 65535;
 				}
 
-				TIM3->ARR = (uint32_t)speed;//update ARR
+				if (speed != 0){
+					TIM3->ARR = (uint32_t)speed;//update ARR
+				}
 			}
 			second_time = !second_time;
 
@@ -177,15 +190,16 @@ void TIM3_IRQHandler(void){
 	}
 }
 
+
 void TIM4_IRQHandler(void){
 if(TIM4->SR & TIM_SR_UIF){ // if UIF flag is set
   TIM4->SR &= ~TIM_SR_UIF; // clear UIF flag
-  //GPIOE->ODR &= ~GPIO_ODR_OD3;
-  //GPIOE->ODR |= GPIO_ODR_OD3;
+
   HAL_GPIO_TogglePin(GPIOE, GPIO_PIN_3);
 
   }
 }
+
 
 void TIM5_IRQHandler(void){
 if(TIM5->SR & TIM_SR_UIF){ // if UIF flag is set
@@ -196,6 +210,7 @@ if(TIM5->SR & TIM_SR_UIF){ // if UIF flag is set
 
   }
 }
+
 
 void TIM7_IRQHandler(void){
 if(TIM7->SR & TIM_SR_UIF){ // if UIF flag is set
@@ -427,15 +442,7 @@ static void MX_GPIO_Init(void)
 
 }
 
-/* USER CODE BEGIN 4 */
 
-/* USER CODE END 4 */
-
-/**
-  * @brief  This function is executed in case of error occurrence.
-  * @param  None
-  * @retval None
-  */
 void _Error_Handler(char * file, int line)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
@@ -465,13 +472,3 @@ void assert_failed(uint8_t* file, uint32_t line)
 }
 
 #endif
-
-/**
-  * @}
-  */ 
-
-/**
-  * @}
-*/ 
-
-/************************ (C) COPYRIGHT STMicroelectronics *****END OF FILE****/
