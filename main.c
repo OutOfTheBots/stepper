@@ -58,16 +58,23 @@ void enable_steppers(void){
 
 void set_speed(float RPM){
 
+	//if target RPM is zero set RPM_zero flag to true
 	if(RPM==0){
 		RPM_zero = 1;
 		target_speed = init_speed;
+	
+	//esle set RPM_zero flag to flase
 	}else{
 		RPM_zero = 0;
+		
+		//set needed direction
 		if(RPM>0)target_dir = 1;
 		else{
 			target_dir = 0;
 			RPM = RPM *-1;
 		}
+		
+		//caculate need target speed count
 		tick_freq = SPR * RPM / 60;
 		target_speed = freq_counter / tick_freq;
 	}
@@ -117,17 +124,24 @@ void TIM4_IRQHandler(void){
 
 	TIM4->SR &= ~TIM_SR_UIF; // clear UIF flag
 
-
+	//if RPM_zero flag is true and current speed is slower or equal to init speed then disbale timer
 	if (RPM_zero && (speed >= init_speed))TIM4->CR1 &= ~TIM_CR1_CEN; //disable channel 1.
 
+	//if currently turning in needed direction
 	if(target_dir == curret_dir){
+		
+		//if current speed i slower than init speed then reset
 		if (speed>=init_speed){
 			speed = init_speed;
 			n=0;
 		}
+		
+		//if targat speed and current speed is slower than init speed then set current speed to target speed 
 		if((target_speed >= init_speed) && (speed >= init_speed)){
 			speed = target_speed;
 			n=0;
+		
+		//else test if need to spped up or slow down to reach target speed
 		}else if(speed>target_speed){
 					n++;
 					speed = speed - ( (2 * speed) / (4 * n + 1) );
@@ -136,12 +150,18 @@ void TIM4_IRQHandler(void){
 		  		  speed = (speed * (4 * n + 1) / (4 * n - 1));
 		  	  }
 
+	//else we are going in wrong direction
 	}else{
+		
+		//if current speed is slower than init speed then change direction and reset
 		if(speed > init_speed-100){
 			if(target_dir)GPIOD->ODR &= ~GPIO_ODR_OD11; //set direction pin
 			else GPIOD->ODR |= GPIO_ODR_OD11; //set direction pin
 			curret_dir = target_dir;
 			speed = init_speed;
+			n=0;
+		
+		//else we are going in wrong direction so slow down to be able to change direction
 		}else{
 			n--;
 			speed = (speed * (4 * n + 1) / (4 * n - 1));
