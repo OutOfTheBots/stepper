@@ -1,229 +1,156 @@
 #include "main.h"
 #include "stm32f4xx_hal.h"
-#include "stm32f4xx.h"
-
-
-TIM_HandleTypeDef htim3;
-TIM_HandleTypeDef htim4;
-TIM_HandleTypeDef htim5;
-TIM_HandleTypeDef htim7;
 
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_TIM3_Init(void);
-static void MX_TIM7_Init(void);
-static void MX_TIM5_Init(void);
-static void MX_TIM4_Init(void);
-
-void stepper_init();
-void set_speed(float target_speed);
 
 #define freq_source 80000000 //internal clock source freq
 
 uint16_t prescaler = 40; //prescaler used by timer
 uint32_t freq_counter; //the freq of the timer calculated from freq_source and prescaler
-uint16_t init_speed = 5000; //this sets the acceleration by setting the timing of first step, the smaller the number the faster the acceleration
+uint16_t init_speed = 10000; //this sets the acceleration by setting the timing of first step, the smaller the number the faster the acceleration
 uint16_t SPR = 3200; //steps per revolution of the stepper motor
 float tick_freq; //the freq that the steps need to be calculated from frq_counter RPM and SPR
-float speed = 0; //the current speed measured by timer ticks in ARR value to count up to
-float target_speed = 0; //the target speed that speed is accelerating towards
+float speed; //the current speed measured by timer ticks in ARR value to count up to
+float target_speed; //the target speed that speed is accelerating towards
 
-int32_t n = 0;
-uint8_t speed_up; //boolean used to tell whether in speed up process or slow down
-int8_t new_dir=1; //the final direction desired
-int8_t old_dir=1; //the direction before
-uint8_t second_time = 0; //boolean used to create double toggle of step pin i.e high/low
+int32_t n;
+int8_t curret_dir, target_dir, RPM_zero;
 
 
-int main(void){
-  SystemClock_Config();
-  stepper_init();
+void stepper_setup(void){
 
-  //test some speeds :)
-  set_speed(200);
-  HAL_Delay(5000);
+	freq_counter = freq_source / (prescaler + 1);
 
-  set_speed(-200);
-  HAL_Delay(5000);
 
-  set_speed(-100);
-  HAL_Delay(5000);
+	RCC->AHB1ENR |= RCC_AHB1ENR_GPIODEN; //enable port D clock
+	GPIOD->MODER |= GPIO_MODER_MODER12_1; //setup pin 12 on port d to AF mode
+	GPIOD->AFR[1] = (GPIOD->AFR[1] & (0b1111<<(4*(12-8))) | 0b0010<<(4*(12-8))); //setup pin 12 on port D to AF timer 2-5
+	GPIOD->MODER |= GPIO_MODER_MODE11_0 | GPIO_MODER_MODE10_0; //setup pin 11 and 13 as output for dir and EN pins
+	GPIOD->ODR &= ~GPIO_ODR_OD11; //set direction pin
 
-  set_speed(0);
-  HAL_Delay(5000);
+	RCC->APB1ENR |= RCC_APB1ENR_TIM4EN; //enable the timer4 clock
+	TIM4->CR1 &= ~TIM_CR1_CEN; //disable channel 1.
+	TIM4->PSC = prescaler;   //set prescale
+	TIM4->CCMR1 = (TIM4->CCMR1 & ~(0b110<<4)) | (0b110<<4); //set PWM mode 110
+	TIM4->CCR1 = 10; //set to min rise time
+	TIM4->ARR = init_speed; //set to timing
+	TIM4->CCER |= TIM_CCER_CC1E; //enable output to pin.
+	TIM4->CR1 |= TIM_CR1_ARPE; //buffer ARR
+	TIM4->DIER |= TIM_DIER_UIE; //enable interupt
 
-  set_speed(200);
-  HAL_Delay(5000);
+	NVIC_EnableIRQ(TIM4_IRQn); // Enable interrupt(NVIC level)
 
-  while (1)  {
-  	  //HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_1);
-	  //HAL_Delay(500);
-  }
+	//initialize variables
+	speed = init_speed;
+	RPM_zero = 1;
+	curret_dir = 1;
+	target_dir =1;
 }
 
-
-void stepper_init(){
-	  MX_GPIO_Init();
-	  MX_TIM3_Init();
-	  MX_TIM7_Init();
-	  MX_TIM5_Init();
-	  MX_TIM4_Init();
-
-	  freq_counter = freq_source / (prescaler + 1);
-
-
-	  TIM3->PSC = prescaler;         // Set prescaler
-	  TIM3->ARR = init_speed;           // Auto reload value
-	  TIM3->DIER = TIM_DIER_UIE; // Enable update interrupt (timer level)
-	  TIM3->CR1 |= TIM_CR1_CEN;   // Enable timer
-	  NVIC_EnableIRQ(TIM3_IRQn); // Enable interrupt from TIM3 (NVIC level)
-	  GPIOE->ODR |= GPIO_ODR_OD1; //set dir pin high
-
-
-
-	  TIM4->PSC = 50;         // Set prescaler
-	  TIM4->ARR = 10;           // Auto reload value
-	  TIM4->DIER = TIM_DIER_UIE; // Enable update interrupt (timer level)
-	  TIM4->CR1 = TIM_CR1_CEN;   // Enable timer
-	  //NVIC_EnableIRQ(TIM4_IRQn); // Enable interrupt(NVIC level)
-
-	  TIM5->PSC = 50;         // Set prescaler
-	  TIM5->ARR = 65535;           // Auto reload value
-	  TIM5->DIER = TIM_DIER_UIE; // Enable update interrupt (timer level)
-	  TIM5->CR1 = TIM_CR1_CEN;   // Enable timer
-	  //NVIC_EnableIRQ(TIM5_IRQn); // Enable interrupt(NVIC level)
-
-	  TIM7->PSC = 50;         // Set prescaler
-	  TIM7->ARR = 1;           // Auto reload value
-	  TIM7->DIER = TIM_DIER_UIE; // Enable update interrupt (timer level)
-	  TIM7->CR1 = TIM_CR1_CEN;   // Enable timer
-	  //NVIC_EnableIRQ(TIM7_IRQn); // Enable interrupt(NVIC level)
+void disable_steppers(void){
+	GPIOD->ODR &= ~GPIO_ODR_OD10; //set enable pin low
 }
 
+void enable_steppers(void){
+	GPIOD->ODR |= GPIO_ODR_OD10; //set enable pin high
+}
 
 void set_speed(float RPM){
 
-	if(RPM > 0){ //set dirction boolean
-		new_dir = 1;
-	}else if (RPM < 0) {
-		new_dir = 0;
-		RPM = -1 * RPM; //if RPM is negative then flip sign
-	}
-
-	if(RPM != 0){ //only enters this loop if desired RPM isn't zero
-
-		tick_freq = 2 * SPR * RPM / 60;
+	if(RPM==0){
+		RPM_zero = 1;
+		target_speed = init_speed;
+	}else{
+		RPM_zero = 0;
+		if(RPM>0)target_dir = 1;
+		else{
+			target_dir = 0;
+			RPM = RPM *-1;
+		}
+		tick_freq = SPR * RPM / 60;
 		target_speed = freq_counter / tick_freq;
-
-		if(target_speed > 65535){ //check that the desired RPM hasn't caused the ARR to overflow
-			target_speed = 65535;
-		}
-
-		if((speed == 0) && (target_speed !=0)){ //if stopped and want to start again
-			speed = init_speed;
-			n = 0;
-		}
-
-		if(target_speed < speed){ //set boolean to either speed up or slow down
-			speed_up = 1;
-		}else {
-			speed_up = 0;
-		}
-
-	}else{ //only does this if desired to stop
-		target_speed = 0;
-		speed_up = 0;
 	}
+	TIM4->CR1 |= TIM_CR1_CEN; //enable channel 1.
 }
 
 
-void TIM3_IRQHandler(void){
-	if(TIM3->SR & TIM_SR_UIF){ // if UIF flag is set
-		TIM3->SR &= ~TIM_SR_UIF; // clear UIF flag
 
-		if((speed != 0) || (target_speed != 0)){ //only enters this loop if not at stand still
-			HAL_GPIO_TogglePin(GPIOE, GPIO_PIN_0); //toggle the step pin, it requires this to happen twice to complet 1 step i.e high/low
 
-			if(second_time){ //only enters this loop every second time that way the toggle happens twice to every 1 loop
 
-				if(new_dir == old_dir){ //only enters this loop if current direction is same as desired direction
+int main(void){
 
-					if(((target_speed > init_speed - 100) || (target_speed == 0)) && (speed > init_speed - 100)){
-						speed = target_speed; //if desired speed is slow and current speed is slow then goto striahgt to it
-					}else if ((speed > init_speed - 100) && (target_speed < init_speed - 100) && (speed_up) && (target_speed !=0)){
-						speed = init_speed; //if current speed is slow and desired speed is fast then goto start acceleration speed
-						n = 0;
-					}
+  HAL_Init();
+  SystemClock_Config();
 
-					if ((speed_up) && (speed > target_speed)){ //enter this loop if speeding up
-						n++;
-						speed = speed - ( (2 * speed) / (4 * n + 1) );
-					}else if ((!speed_up) && ((speed < target_speed) || target_speed == 0)){ //enter this loop if slowing down
-						n--;
-						speed = (speed * (4 * n + 1) / (4 * n - 1));
-					}
+  stepper_setup();
 
-				}else{ //only enters this loop if current direction is different to desired direction
 
-					if(speed == 65000){ //if speed is super slow then toggle dir pin and set speed_up boolean to speed up
-						HAL_GPIO_TogglePin(GPIOE, GPIO_PIN_1);
-						old_dir = new_dir;
-						speed_up = 1;
 
-					}else if(speed > init_speed - 100){ //if speed is slower than acceleration speed then set speed to super slow
-						speed = 65000;
+  enable_steppers();
 
-					}else{ //onyl enters this loop if going fast to just decelerate
-						n--;
-						speed = (speed * (4 * n + 1) / (4 * n - 1));
-					}
-				}
 
-				if(speed > 65535){ //check to make sure speed won't over the ARR
-					speed = 65535;
-				}
+  set_speed(400);
+  HAL_Delay(3000);
 
-				if (speed != 0){ //if speed isn't zero then update ARR
-					TIM3->ARR = (uint32_t)speed;//update ARR
-				}
-			}
-			second_time = !second_time; //flip second_time boolean
+  set_speed(-210);
+  HAL_Delay(3000);
 
-		}
-	}
+  set_speed(1);
+  HAL_Delay(3000);
+
+  set_speed(300);
+  HAL_Delay(3000);
+
+
+  disable_steppers();
+
+
+  while (1){
+
+
+  }
 }
 
 
 void TIM4_IRQHandler(void){
-if(TIM4->SR & TIM_SR_UIF){ // if UIF flag is set
-  TIM4->SR &= ~TIM_SR_UIF; // clear UIF flag
 
-  HAL_GPIO_TogglePin(GPIOE, GPIO_PIN_3);
+	TIM4->SR &= ~TIM_SR_UIF; // clear UIF flag
 
-  }
+
+	if (RPM_zero && (speed >= init_speed))TIM4->CR1 &= ~TIM_CR1_CEN; //disable channel 1.
+
+	if(target_dir == curret_dir){
+		if (speed>=init_speed){
+			speed = init_speed;
+			n=0;
+		}
+		if((target_speed >= init_speed) && (speed >= init_speed)){
+			speed = target_speed;
+			n=0;
+		}else if(speed>target_speed){
+					n++;
+					speed = speed - ( (2 * speed) / (4 * n + 1) );
+		  	  }else{
+		  		  n--;
+		  		  speed = (speed * (4 * n + 1) / (4 * n - 1));
+		  	  }
+
+	}else{
+		if(speed > init_speed-100){
+			if(target_dir)GPIOD->ODR &= ~GPIO_ODR_OD11; //set direction pin
+			else GPIOD->ODR |= GPIO_ODR_OD11; //set direction pin
+			curret_dir = target_dir;
+			speed = init_speed;
+		}else{
+			n--;
+			speed = (speed * (4 * n + 1) / (4 * n - 1));
+		}
+	}
+	TIM4->ARR = (uint32_t)speed;//update ARR
 }
 
 
-void TIM5_IRQHandler(void){
-if(TIM5->SR & TIM_SR_UIF){ // if UIF flag is set
-  TIM5->SR &= ~TIM_SR_UIF; // clear UIF flag
-
-  GPIOE->ODR |= GPIO_ODR_OD5;
-  GPIOE->ODR &= ~GPIO_ODR_OD5;
-
-  }
-}
-
-
-void TIM7_IRQHandler(void){
-if(TIM7->SR & TIM_SR_UIF){ // if UIF flag is set
-  TIM7->SR &= ~TIM_SR_UIF; // clear UIF flag
-
-  GPIOE->ODR |= GPIO_ODR_OD7;
-  GPIOE->ODR &= ~GPIO_ODR_OD7;
-
-  }
-}
 
 
 /** System Clock Configuration
@@ -242,12 +169,11 @@ void SystemClock_Config(void)
 
     /**Initializes the CPU, AHB and APB busses clocks 
     */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.HSICalibrationValue = 16;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-  RCC_OscInitStruct.PLL.PLLM = 8;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLM = 4;
   RCC_OscInitStruct.PLL.PLLN = 168;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
   RCC_OscInitStruct.PLL.PLLQ = 4;
@@ -282,130 +208,9 @@ void SystemClock_Config(void)
   HAL_NVIC_SetPriority(SysTick_IRQn, 0, 0);
 }
 
-/* TIM3 init function */
-static void MX_TIM3_Init(void)
-{
-
-  TIM_ClockConfigTypeDef sClockSourceConfig;
-  TIM_MasterConfigTypeDef sMasterConfig;
-
-  htim3.Instance = TIM3;
-  htim3.Init.Prescaler = 0;
-  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim3.Init.Period = 0;
-  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
-  {
-    _Error_Handler(__FILE__, __LINE__);
-  }
-
-  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  if (HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig) != HAL_OK)
-  {
-    _Error_Handler(__FILE__, __LINE__);
-  }
-
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
-  {
-    _Error_Handler(__FILE__, __LINE__);
-  }
-
-}
-
-/* TIM4 init function */
-static void MX_TIM4_Init(void)
-{
-
-  TIM_ClockConfigTypeDef sClockSourceConfig;
-  TIM_MasterConfigTypeDef sMasterConfig;
-
-  htim4.Instance = TIM4;
-  htim4.Init.Prescaler = 0;
-  htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim4.Init.Period = 0;
-  htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  if (HAL_TIM_Base_Init(&htim4) != HAL_OK)
-  {
-    _Error_Handler(__FILE__, __LINE__);
-  }
-
-  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  if (HAL_TIM_ConfigClockSource(&htim4, &sClockSourceConfig) != HAL_OK)
-  {
-    _Error_Handler(__FILE__, __LINE__);
-  }
-
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig) != HAL_OK)
-  {
-    _Error_Handler(__FILE__, __LINE__);
-  }
-
-}
-
-/* TIM5 init function */
-static void MX_TIM5_Init(void)
-{
-
-  TIM_ClockConfigTypeDef sClockSourceConfig;
-  TIM_MasterConfigTypeDef sMasterConfig;
-
-  htim5.Instance = TIM5;
-  htim5.Init.Prescaler = 0;
-  htim5.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim5.Init.Period = 0;
-  htim5.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  if (HAL_TIM_Base_Init(&htim5) != HAL_OK)
-  {
-    _Error_Handler(__FILE__, __LINE__);
-  }
-
-  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  if (HAL_TIM_ConfigClockSource(&htim5, &sClockSourceConfig) != HAL_OK)
-  {
-    _Error_Handler(__FILE__, __LINE__);
-  }
-
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim5, &sMasterConfig) != HAL_OK)
-  {
-    _Error_Handler(__FILE__, __LINE__);
-  }
-
-}
-
-
-/* TIM7 init function */
-static void MX_TIM7_Init(void)
-{
-
-  TIM_MasterConfigTypeDef sMasterConfig;
-
-  htim7.Instance = TIM7;
-  htim7.Init.Prescaler = 0;
-  htim7.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim7.Init.Period = 0;
-  if (HAL_TIM_Base_Init(&htim7) != HAL_OK)
-  {
-    _Error_Handler(__FILE__, __LINE__);
-  }
-
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim7, &sMasterConfig) != HAL_OK)
-  {
-    _Error_Handler(__FILE__, __LINE__);
-  }
-
-}
-
-/** Configure pins as
-        * Analog
-        * Input
+/** Configure pins as 
+        * Analog 
+        * Input 
         * Output
         * EVENT_OUT
         * EXTI
@@ -413,39 +218,20 @@ static void MX_TIM7_Init(void)
 static void MX_GPIO_Init(void)
 {
 
-  GPIO_InitTypeDef GPIO_InitStruct;
-
   /* GPIO Ports Clock Enable */
-  __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
-  __HAL_RCC_GPIOA_CLK_ENABLE();
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOE, GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5
-                          |GPIO_PIN_6|GPIO_PIN_7|GPIO_PIN_0|GPIO_PIN_1, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET);
-
-  /*Configure GPIO pins : PE2 PE3 PE4 PE5
-                           PE6 PE7 PE0 PE1 */
-  GPIO_InitStruct.Pin = GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5
-                          |GPIO_PIN_6|GPIO_PIN_7|GPIO_PIN_0|GPIO_PIN_1;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : PA1 */
-  GPIO_InitStruct.Pin = GPIO_PIN_1;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
 }
 
+/* USER CODE BEGIN 4 */
 
+/* USER CODE END 4 */
+
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @param  None
+  * @retval None
+  */
 void _Error_Handler(char * file, int line)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
@@ -475,3 +261,13 @@ void assert_failed(uint8_t* file, uint32_t line)
 }
 
 #endif
+
+/**
+  * @}
+  */ 
+
+/**
+  * @}
+*/ 
+
+/************************ (C) COPYRIGHT STMicroelectronics *****END OF FILE****/
